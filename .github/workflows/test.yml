@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
-      # The CPU build of PyTorch, a fraction of the CUDA build's download.
+        with:
+          enable-cache: true
+      # The CPU build of PyTorch, a fraction of the CUDA build's download. uv.lock pins the CUDA build for
+      # Linux, with its NVIDIA libraries, so `uv sync --locked` would download them.
       - run: uv venv && uv pip install --torch-backend cpu -e . pytest
       - run: uv run --no-sync pytest

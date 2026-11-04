@@ -19,7 +19,15 @@ STAGES = (
     Stage("group", 2000, 5e-4, 10.0, True),
     Stage("group-more", 2000, 5e-4, 10.0, True),
 )
-BATCH = 512  # windows of 256 tokens per step
+BATCH = 512  # windows of LENGTH tokens per step
+LENGTH = 256  # tokens per window, and each layer's attention window
+NEIGHBOURS = 16  # most neighbours an animal sees
+KEEP = (0, 1, 2, 4, 8, 16)  # nearest neighbours a training batch shows, drawn uniformly per batch
+# Each stage's learning rate rises linearly over its first WARMUP_FRACTION of steps, then follows a cosine down
+# to FINAL_LR_FRACTION of its peak. AdamW's weight decay applies to the weight matrices only.
+WARMUP_FRACTION = 0.1
+FINAL_LR_FRACTION = 0.1
+WEIGHT_DECAY = 0.1
 
 
 @dataclass(frozen=True)

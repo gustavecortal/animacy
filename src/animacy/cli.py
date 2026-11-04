@@ -1,10 +1,10 @@
 """animacy: fetch the recordings, build the corpus, train, export for the browser, and draw a rollout.
 
+    animacy rollout fish      out/fish.gif: the exported model moving a school of 10 fish
     animacy fetch fish        download the fish sessions (flies, both: the fly sessions or all)
     animacy build fish        the corpus and scenes in data/fish/
     animacy train fish        the three training stages in runs/fish/
     animacy export fish       exports/fish/ from the last stage
-    animacy rollout fish      out/fish.gif: the exported model continuing a held-out school
 """
 
 import argparse
@@ -42,54 +42,29 @@ def fetch(name: str) -> int:
 def build(name: str) -> None:
     from . import corpus, data, scenes
 
-    recipe = MODELS[name]
-    records, runs, zooms = [], [], {}
-    for family in recipe.families:
-        r, f = data.family_runs(family, SESSIONS)
-        if recipe.body_lengths:
-            f, z = data.in_body_lengths(f, SESSIONS)
-            zooms |= z
-            # A tracking region is in pixels, wrong once positions are rescaled. It is dropped rather than
-            # rescaled because the shipped scenes.json and seeds' arenas were built without it.
-            r = [{**x, "roi": None} for x in r]
-        records += r
-        runs += f
     corpus_dir, scenes_dir = paths(name)
-    summary = corpus.build(runs, corpus_dir)
-    if zooms:
-        (corpus_dir / "zooms.json").write_text(json.dumps(zooms, indent=1), encoding="utf-8", newline="\n")
+    records, runs, zooms = data.model_runs(MODELS[name].families, MODELS[name].body_lengths, SESSIONS)
+    summary = corpus.build(runs, corpus_dir, zooms)
     built = scenes.build(runs, records, corpus_dir, scenes_dir)
     print(json.dumps({"scale": summary["scale"], "corpus": {p: a["sequences"] for p, a in summary["arrays"].items()}, "scenes": built["partitions"]}, indent=1))
 
 
-def train(name: str, stage: str | None, steps: int | None, batch: int, out: Path | None) -> None:
+def export(name: str, checkpoint: Path | None, out: Path | None) -> None:
     import torch
 
-    from . import train
+    from .export import export
 
-    corpus_dir, scenes_dir = paths(name)
-    previous = None
-    for s in STAGES:
-        here = (out or Path("runs") / name) / s.name
-        if stage in (None, s.name):
-            wanted = {"steps": steps or s.steps, "lr": s.lr, "mean_weight": s.mean_weight, "batch": batch}
-            if (here / "model.pt").exists():
-                run = torch.load(here / "model.pt", map_location="cpu", weights_only=False)["run"]
-                if any(run.get(k) != v for k, v in wanted.items()):
-                    raise SystemExit(f"{here} was trained with {({k: run.get(k) for k in wanted})}, not {wanted}: remove it or pass --out")
-                print(f"{name}: {s.name} already trained in {here}, skipped", flush=True)
-            else:
-                print(f"{name}: {s.name}", flush=True)
-                train.train(corpus_dir, scenes_dir if s.neighbours else None, here, wanted["steps"], s.lr, s.mean_weight, previous, batch)
-        if stage == s.name:
-            return
-        previous = here / "model.pt"
+    checkpoint = checkpoint or Path("runs") / name / STAGES[-1].name / "model.pt"
+    step = torch.load(checkpoint, map_location="cpu", weights_only=False)["step"]
+    if out is None and step != STAGES[-1].steps:
+        raise SystemExit(f"{checkpoint} was trained for {step} steps, not {STAGES[-1].steps}: pass --out to export it outside exports/")
+    print(json.dumps(export(checkpoint, *paths(name), SESSIONS, out or Path("exports") / name, MODELS[name].head_windows), indent=1))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="animacy", description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog="\n".join(__doc__.splitlines()[2:]))
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("fetch", "build", "train", "export", "rollout"):
+    for command in ("rollout", "fetch", "build", "train", "export"):
         sub = commands.add_parser(command)
         sub.add_argument("model", choices=MODELS)
         if command == "train":
@@ -101,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--checkpoint", type=Path, help=f"runs/<model>/{STAGES[-1].name}/model.pt by default")
             sub.add_argument("--out", type=Path, help="exports/<model> by default")
         if command == "rollout":
+            sub.add_argument("--recorded", action="store_true", help="start from a recorded school of a validation scene, which needs fetch and build")
             sub.add_argument("--export", type=Path, help="exports/<model> by default")
             sub.add_argument("--seconds", type=float, default=20.0)
             sub.add_argument("--seed", type=int, default=0)
@@ -109,29 +85,18 @@ def main(argv: list[str] | None = None) -> int:
     name = args.model
     if args.command == "fetch":
         return fetch(name)
-    elif args.command == "build":
+    if args.command == "build":
         build(name)
     elif args.command == "train":
-        train(name, args.stage, args.steps, args.batch, args.out)
+        from .train import train_stages
+
+        train_stages(*paths(name), args.out or Path("runs") / name, args.stage, args.steps, args.batch)
     elif args.command == "export":
-        import torch
-
-        from .export import export
-
-        corpus_dir, scenes_dir = paths(name)
-        checkpoint = args.checkpoint or Path("runs") / name / STAGES[-1].name / "model.pt"
-        step = torch.load(checkpoint, map_location="cpu", weights_only=False)["step"]
-        if args.out is None and step != STAGES[-1].steps:
-            raise SystemExit(f"{checkpoint} was trained for {step} steps, not {STAGES[-1].steps}: pass --out to export it outside exports/")
-        print(json.dumps(export(checkpoint, corpus_dir, scenes_dir, SESSIONS, args.out or Path("exports") / name, MODELS[name].head_windows), indent=1))
+        export(name, args.checkpoint, args.out)
     elif args.command == "rollout":
         from .rollout import rollout
 
-        corpus_dir, scenes_dir = paths(name)
+        recorded = (*paths(name), SESSIONS) if args.recorded else None
         dest = args.out or Path("out") / f"{name}.gif"
-        print(json.dumps(rollout(args.export or Path("exports") / name, corpus_dir, scenes_dir, SESSIONS, dest, MODELS[name].temperature, args.seconds, args.seed), indent=1))
+        print(json.dumps(rollout(args.export or Path("exports") / name, dest, MODELS[name].temperature, args.seconds, args.seed, recorded), indent=1))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

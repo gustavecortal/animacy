@@ -61,6 +61,11 @@ def to_common(xy: np.ndarray, width: int, height: int) -> np.ndarray:
     return np.column_stack([(xy[:, 0] - width / 2) / extent, (height / 2 - xy[:, 1]) / extent])
 
 
+def grid_rows(first: float, last: float) -> np.ndarray:
+    """The rows k of the 30 Hz grid whose instant k / RATE_HZ lies between first and last seconds."""
+    return np.arange(int(np.ceil(first * RATE_HZ - 1e-9)), int(np.floor(last * RATE_HZ + 1e-9)) + 1)
+
+
 @functools.cache
 def taps(native_hz: float) -> np.ndarray:
     return signal.firwin(FIR_TAPS, min(FIR_CUTOFF_HZ, FIR_CUTOFF_FRACTION * native_hz), fs=native_hz)
@@ -79,11 +84,11 @@ def resample(t: np.ndarray, xy: np.ndarray, native_hz: float, shared_clock: bool
     xy = np.column_stack([np.convolve(xy[:, i], taps(native_hz), mode="valid") for i in range(2)])
     t = t[FIR_HALF : len(t) - FIR_HALF]
     if shared_clock:
-        grid = np.arange(np.ceil(t[0] * RATE_HZ - 1e-9), np.floor(t[-1] * RATE_HZ + 1e-9) + 1) / RATE_HZ
+        grid = grid_rows(t[0], t[-1]) / RATE_HZ
         if len(grid) < 3:
             return None
     else:
-        count = int(np.floor((t[-1] - t[0]) * RATE_HZ + 1e-9)) + 1
+        count = len(grid_rows(0.0, t[-1] - t[0]))
         grid = t[-1] - np.arange(count - 1, -1, -1) / RATE_HZ
     return grid, np.column_stack([np.interp(grid, t, xy[:, i]) for i in range(2)])
 
@@ -114,9 +119,9 @@ def split_groups(seconds_by_source: dict[str, dict[str, float]]) -> dict[str, di
     return manifest
 
 
-def build(runs: list[Run], out: Path) -> dict:
+def build(runs: list[Run], out: Path, zooms: dict[str, float] | None = None) -> dict:
     """Resample every run, freeze the group splits, and write train/validation/test.npz, corpus.json,
-    sequences.jsonl and split-manifest.json to out/."""
+    sequences.jsonl and split-manifest.json to out/, and zooms.json if `zooms` rescaled the runs."""
     seconds_by_source = {}
     for run in runs:
         groups = seconds_by_source.setdefault(run.source, {})
@@ -153,7 +158,7 @@ def build(runs: list[Run], out: Path) -> dict:
         path = out / f"{partition}.npz"
         np.savez(path, positions=np.concatenate(sequences), sequence_offsets=np.r_[0, np.cumsum(lengths)].astype(np.int64))
         arrays[partition] = {"file": path.name, "sha256": sha256(path.read_bytes()), "sequences": len(lengths), "positions": int(sum(lengths))}
-    with (out / "sequences.jsonl").open("w", newline="\n") as f:
+    with (out / "sequences.jsonl").open("w", encoding="utf-8", newline="\n") as f:
         for partition in parts:
             for row in rows[partition]:
                 f.write(json.dumps(row) + "\n")
@@ -172,6 +177,8 @@ def build(runs: list[Run], out: Path) -> dict:
         "dropped_short_runs": dropped,
     }  # fmt: skip
     write_json(out / "corpus.json", corpus)
+    if zooms:
+        write_json(out / "zooms.json", zooms)
     return corpus
 
 
@@ -185,7 +192,7 @@ def load_npz(path: Path, expected_sha256: str, *names: str) -> list[np.ndarray]:
 
 def partitions(corpus_dir: Path) -> dict[str, str]:
     """Every source's split groups, {group: partition}."""
-    families = json.loads((corpus_dir / "split-manifest.json").read_text())["groups"]
+    families = json.loads((corpus_dir / "split-manifest.json").read_text(encoding="utf-8"))["groups"]
     return {group: partition for groups in families.values() for group, partition in groups.items()}
 
 
@@ -197,7 +204,7 @@ def sequence_field(corpus_dir: Path, partition: str, name: str) -> list:
 
 def load(corpus_dir: Path, partition: str) -> tuple[np.ndarray, np.ndarray, float]:
     """A partition's positions, sequence offsets and the training scale."""
-    corpus = json.loads((corpus_dir / "corpus.json").read_text())
+    corpus = json.loads((corpus_dir / "corpus.json").read_text(encoding="utf-8"))
     entry = corpus["arrays"][partition]
     positions, offsets = load_npz(corpus_dir / entry["file"], entry["sha256"], "positions", "sequence_offsets")
     return positions, offsets, corpus["scale"]

@@ -57,19 +57,27 @@ def _nulls(a: np.ndarray) -> list:
     return np.where(np.isfinite(a), a.astype(np.float64), None).tolist()
 
 
+# The page's format has a wall input, always off here, which model.json names before head_windows.
 def page_config(c: Config) -> dict:
-    """The config as model.json names it. The page's format also has a wall input, always off here."""
+    """The config as model.json names it."""
     out = asdict(c)
     head_windows = out.pop("head_windows")
     return out | {"walls": False, "head_windows": head_windows}
+
+
+def model_config(page: dict) -> Config:
+    """The Config of model.json's config."""
+    config = {k: v for k, v in page.items() if k != "walls"}
+    return Config(**{**config, "head_windows": tuple(map(tuple, config["head_windows"]))})
 
 
 def fixtures(model: Model, scale: float, scenes_dir: Path) -> dict:
     """The first animal of the validation scene with fewest animals observed for FIXTURE_TOKENS + 1 rows: its
     tokens, every animal's `seen` and `seen_step` at each token's instant (null where unobserved), its index,
     and raw head output at FIXTURE_INDICES with neighbours and without."""
-    for _, session in sorted((e["animals"], s) for s, e in scenes.sessions(scenes_dir, "validation").items()):
-        positions, seen, seen_step = scenes.load(scenes_dir, session, "positions", "seen", "seen_step")
+    entries = scenes.sessions(scenes_dir, "validation")
+    for _, session in sorted((e["animals"], s) for s, e in entries.items()):
+        positions, seen, seen_step = scenes.load(scenes_dir, entries[session], "positions", "seen", "seen_step")
         long = [(j, first) for j, first, last in data.runs(np.isfinite(positions[..., 0])) if last - first > FIXTURE_TOKENS]
         if long:
             break
@@ -149,7 +157,7 @@ def seeds(corpus_dir: Path, scenes_dir: Path, data_dir: Path) -> dict:
     within[train_offsets[1:-1] - 1] = False  # no step joins two sequences
     out = {"fish": chosen, "body": round(float(np.median(mine)), 5), "pace": round(float(np.percentile(moved[within], 90)), 5), "schools": []}
     for session, entry in scenes.sessions(scenes_dir, "validation").items():
-        positions, seen, seen_step = scenes.load(scenes_dir, session, "positions", "seen", "seen_step")
+        positions, seen, seen_step = scenes.load(scenes_dir, entry, "positions", "seen", "seen_step")
         lo, hi = scenes.arena(entry, positions)
         centre = (lo + hi) / 2
         rows = lambda a, start, shift=0: np.round(a[start - scenes.SEED_ROWS : start + 1].astype(np.float64) - shift, 6).transpose(1, 0, 2)
@@ -218,8 +226,7 @@ def load_export(directory: Path) -> Model:
     weights = (directory / "weights.bin").read_bytes()
     if manifest["version"] != VERSION or sha256(weights) != manifest["weights_sha256"]:
         raise ValueError(f"{directory}: unknown version or weights that do not match model.json")
-    config = {k: v for k, v in manifest["config"].items() if k != "walls"}
-    model = Model(Config(**{**config, "head_windows": tuple(map(tuple, config["head_windows"]))}))
+    model = Model(model_config(manifest["config"]))
     state = {t["name"]: torch.from_numpy(np.frombuffer(weights, "<f2", t["bytes"] // 2, t["offset"]).astype(np.float32).reshape(t["shape"])) for t in manifest["tensors"]}
     model.load_state_dict(state)
     model.scale = manifest["scale"]

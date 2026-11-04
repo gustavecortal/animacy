@@ -1,15 +1,15 @@
 """The idtracker.ai recordings: download from the authors' public Google Drive folder, checks, and runs.
 
-Each session folder holds `trajectories/with_gaps_csv/trajectories.csv` (the tracker's centroids, empty where an
+Each session folder holds `trajectories/with_gaps_csv/trajectories.csv` (the tracker's centroids, NaN where an
 animal was not identified) and `trajectories/validated_csv/` (after human validation, complete). A position is
 used only where the tracker measured it and validation kept it unchanged.
 """
 
-import csv
 import dataclasses
 import functools
 import html
 import http.client
+import io
 import json
 import re
 import struct
@@ -36,6 +36,7 @@ SESSION_FILES = {
     "with_gaps.csv": "trajectories/with_gaps_csv/trajectories.csv",
     "validated.csv": "trajectories/validated_csv/trajectories.csv",
     "validated_attributes.json": "trajectories/validated_csv/attributes.json",
+    "inconsistent_frames.csv": "inconsistent_frames.csv",  # in some sessions only
 }
 
 # Split groups: recordings that may film the same animals stay in one partition. Several "zebrafish"
@@ -72,7 +73,7 @@ FLIES = {
 }
 FAMILIES = {"fish": FISH, "flies": FLIES}
 REFERENCE_BODY = 0.0202  # the median fish body length, in frame units, which body-length positions keep
-
+EMPTY_FIELD = re.compile(r"(?m)(?<![^,\n])(?=,|\r?$)")  # where a CSV field is empty
 
 
 def pinned() -> dict[str, dict[str, str]]:
@@ -97,7 +98,6 @@ def retried(request, attempts: int = 8):
             if not transient(error) or attempt == attempts - 1:
                 raise
             time.sleep(5 * 2**attempt)
-    raise AssertionError("unreachable")
 
 
 def check_quota(url: str, page: bytes) -> None:
@@ -184,7 +184,10 @@ def video_header(session: str) -> dict:
     i = data.find(b"avih")
     width, height = struct.unpack_from("<2I", data, i + 40)
     # A stream header is "strh", its size, then the stream type: the video stream's gives the rate.
-    i = next(i for i in range(len(data) - 12) if data[i : i + 4] == b"strh" and data[i + 8 : i + 12] == b"vids")
+    video = re.search(rb"strh....vids", data, re.S)
+    if video is None:
+        raise ValueError(f"{session}.avi has no video stream header in its first 64 KiB")
+    i = video.start()
     scale, rate = struct.unpack_from("<2I", data, i + 28)
     (length,) = struct.unpack_from("<I", data, i + 40)
     return {"size": [width, height], "rate": rate, "scale": scale, "fps": rate / scale, "frames": length}
@@ -200,9 +203,7 @@ def fetch(session: str, data_dir: Path) -> None:
         if path.exists() and sha256(path.read_bytes()) == expected[name]:
             continue
         remote = remote or find(TRACKED_SESSIONS, f"session_{session}")
-        if name == "inconsistent_frames.csv":
-            data = get_range(FILE_URL.format(find(remote, name)))
-        elif name == "video_header.json":
+        if name == "video_header.json":
             data = json.dumps(video_header(session)).encode()
         else:
             data = get_range(FILE_URL.format(find(remote, SESSION_FILES[name])))
@@ -211,14 +212,17 @@ def fetch(session: str, data_dir: Path) -> None:
         write_atomic(path, data)
 
 
-def load_positions(path: Path) -> np.ndarray:
-    """A trajectories CSV (`x1, y1, x2, y2, ...` in pixels) as float64 [frames, animals, 2], NaN where empty."""
-    with path.open(newline="") as f:
-        rows = csv.reader(f)
-        header = next(rows)
-        if len(header) % 2 or header[:2] != ["x1", "y1"]:
-            raise ValueError(f"{path}: unexpected header {header[:5]}")
-        values = np.array([[float(x) if x else np.nan for x in row] for row in rows])
+def load_positions(raw: bytes, path: Path) -> np.ndarray:
+    """The bytes of a trajectories CSV (`x1, y1, x2, y2, ...` in pixels) as float64 [frames, animals, 2],
+    NaN where nan or empty."""
+    header, _, rows = raw.decode().partition("\n")
+    header = header.rstrip("\r").split(",")
+    if len(header) % 2 or header[:2] != ["x1", "y1"]:
+        raise ValueError(f"{path}: unexpected header {header[:5]}")
+    try:
+        values = np.loadtxt(io.StringIO(rows), delimiter=",", ndmin=2)
+    except ValueError:  # empty fields, which the pinned files do not have
+        values = np.loadtxt(io.StringIO(EMPTY_FIELD.sub("nan", rows.rstrip())), delimiter=",", ndmin=2)
     return values.reshape(len(values), -1, 2)
 
 
@@ -244,20 +248,20 @@ def session(name: str, group: str, data_dir: Path) -> tuple[dict, np.ndarray, np
     """A session's record (group, animals, frames, fps, frame_size, roi, inconsistent_frames), its
     measured positions and their observed mask, after checking the files agree with the video."""
     folder = data_dir / name
-    expected = pinned()[name]
-    for file in expected:
-        if sha256((folder / file).read_bytes()) != expected[file]:
+    files = {}
+    for file, expected in pinned()[name].items():
+        files[file] = (folder / file).read_bytes()
+        if sha256(files[file]) != expected:
             raise ValueError(f"{folder / file} differs from the file the models were trained on: run fetch again")
-    meta = json.loads((folder / "session.json").read_text())
-    header = json.loads((folder / "video_header.json").read_text())
-    with_gaps = load_positions(folder / "with_gaps.csv")
-    validated = load_positions(folder / "validated.csv")
+    meta = json.loads(files["session.json"])
+    header = json.loads(files["video_header.json"])
+    with_gaps = load_positions(files["with_gaps.csv"], folder / "with_gaps.csv")
+    validated = load_positions(files["validated.csv"], folder / "validated.csv")
     if with_gaps.shape != validated.shape or len(with_gaps) != header["frames"]:
         raise ValueError(f"{name}: exports {with_gaps.shape} and {validated.shape}, video {header['frames']} frames")
     if header["size"] != [meta["original_width"], meta["original_height"]] or meta["resolution_reduction"] != 1:
         raise ValueError(f"{name}: video {header['size']}, session {meta['original_width']}x{meta['original_height']}")
-    inconsistent = folder / "inconsistent_frames.csv"
-    excluded = [int(x) for x in inconsistent.read_text().split()] if inconsistent.exists() else []
+    excluded = [int(x) for x in files.get("inconsistent_frames.csv", b"").split()]
     record = {
         "session": name, "group": group, "animals": with_gaps.shape[1], "frames": len(with_gaps),
         "fps": header["fps"], "frame_size": header["size"], "roi": meta["roi_list"], "inconsistent_frames": excluded,
@@ -277,6 +281,23 @@ def family_runs(family: str, data_dir: Path) -> tuple[list[dict], list[Run]]:
                            xy=xy[frames, animal], native_hz=record["fps"], frame_size=tuple(record["frame_size"]),
                            provenance={"frames": [first, last]}))  # fmt: skip
     return records, out
+
+
+def model_runs(families: tuple[str, ...], body_lengths: bool, data_dir: Path) -> tuple[list[dict], list[Run], dict[str, float]]:
+    """The session records and runs of a model's families, in body lengths if `body_lengths` (see
+    in_body_lengths), and each rescaled session's zoom."""
+    records, out, zooms = [], [], {}
+    for family in families:
+        r, f = family_runs(family, data_dir)
+        if body_lengths:
+            f, z = in_body_lengths(f, data_dir)
+            zooms |= z
+            # A tracking region is in pixels, wrong once positions are rescaled. It is dropped rather than
+            # rescaled because the shipped scenes.json and seeds' arenas were built without it.
+            r = [{**x, "roi": None} for x in r]
+        records += r
+        out += f
+    return records, out, zooms
 
 
 def body_pixels(data_dir: Path, name: str) -> tuple[float, int]:

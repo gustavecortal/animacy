@@ -22,16 +22,11 @@ SEED_ROWS = 2 * RATE_HZ  # a school's seed: 2 s of every animal
 CONTINUATION_ROWS = 60 * RATE_HZ  # the real continuation a start must keep observed
 
 
-def native_rows(run: corpus.Run) -> np.ndarray:
-    """The grid rows whose instant lies inside the run's native interval."""
-    return np.arange(int(np.ceil(run.t[0] * RATE_HZ - 1e-9)), int(np.floor(run.t[-1] * RATE_HZ + 1e-9)) + 1)
-
-
 def observed_by(run: corpus.Run) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The run's native_rows, and at each its latest native position at or before that instant and the
-    native step that reached it, per grid interval, NaN for the run's first frame."""
+    """The grid rows inside the run's native interval, and at each its latest native position at or before
+    that instant and the native step that reached it, per grid interval, NaN for the run's first frame."""
     native = corpus.to_common(run.xy, *run.frame_size)
-    rows = native_rows(run)
+    rows = corpus.grid_rows(run.t[0], run.t[-1])
     latest = np.searchsorted(run.t, rows / RATE_HZ + 1e-9, side="right") - 1
     step = np.full((len(rows), 2), np.nan)
     moved = latest > 0
@@ -51,7 +46,7 @@ def build(runs: list[corpus.Run], records: list[dict], corpus_dir: Path, out: Pa
     sessions = {}
     for record in records:
         name = record["session"]
-        steps = int(np.floor((record["frames"] - 1) / record["fps"] * RATE_HZ + 1e-9)) + 1
+        steps = len(corpus.grid_rows(0.0, (record["frames"] - 1) / record["fps"]))
         positions = np.full((steps, record["animals"], 2), np.nan, dtype=np.float32)
         seen, seen_step = np.full_like(positions, np.nan), np.full_like(positions, np.nan)
         dropped = 0.0
@@ -100,15 +95,19 @@ def build(runs: list[corpus.Run], records: list[dict], corpus_dir: Path, out: Pa
     return summary
 
 
+def read(scenes_dir: Path) -> dict:
+    """scenes.json: the scale, and each session's entry by name."""
+    return json.loads((scenes_dir / "scenes.json").read_text(encoding="utf-8"))
+
+
 def sessions(scenes_dir: Path, partition: str) -> dict[str, dict]:
     """The `partition` sessions' entries in scenes.json, by name."""
-    summary = json.loads((scenes_dir / "scenes.json").read_text(encoding="utf-8"))
-    return {s: e for s, e in summary["sessions"].items() if e["partition"] == partition}
+    return {s: e for s, e in read(scenes_dir)["sessions"].items() if e["partition"] == partition}
 
 
-def load(scenes_dir: Path, session: str, *names: str) -> list[np.ndarray]:
-    """A session's named arrays [rows, animals, 2], NaN where unobserved, checked against scenes.json."""
-    entry = json.loads((scenes_dir / "scenes.json").read_text())["sessions"][session]
+def load(scenes_dir: Path, entry: dict, *names: str) -> list[np.ndarray]:
+    """The named arrays [rows, animals, 2] of a session's scenes.json entry, NaN where unobserved, checked
+    against the entry's hash."""
     return corpus.load_npz(scenes_dir / entry["file"], entry["sha256"], *names)
 
 

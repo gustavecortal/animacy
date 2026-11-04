@@ -60,7 +60,7 @@ def local_causal_mask(n: int, window: int, device) -> torch.Tensor:
 
 
 class Block(nn.Module):
-    def __init__(self, c: Config, layer: int = 0):
+    def __init__(self, c: Config, layer: int):
         super().__init__()
         self.heads = c.heads
         self.window = c.window
@@ -167,10 +167,10 @@ class Model(nn.Module):
         n = tokens.shape[1]
         c = self.config
         cos, sin = rope_angles(n, c.width // c.heads, c.rope_base, tokens)
-        mask = local_causal_mask(n, c.window, tokens.device) if n > c.window else None
-        masks = [mask] * c.layers
         if c.head_windows:  # one mask per head, [heads, n, n]
             masks = [torch.stack([local_causal_mask(n, w, tokens.device) for w in row]) for row in c.head_windows]
+        else:
+            masks = [local_causal_mask(n, c.window, tokens.device) if n > c.window else None] * c.layers
         x = self.embed(tokens)
         if neighbours is not None:
             x = x + self.social(tokens, *neighbours)
@@ -210,7 +210,8 @@ def load_checkpoint(path, neighbours: int | None = None) -> tuple[Model, dict]:
     """A checkpoint's model on the CPU, and the checkpoint. With `neighbours`, the model that sees that
     many, its pathway new where the checkpoint has none."""
     ckpt = torch.load(path, weights_only=False, map_location="cpu")
-    config = {k: v for k, v in ckpt["config"].items() if k != "walls"}  # checkpoints of the site's research code name an unused wall input
+    # The checkpoints the shipped models came from name a wall input, always off, which this model lacks.
+    config = {k: v for k, v in ckpt["config"].items() if k != "walls"}
     if ckpt["config"].get("walls"):
         raise ValueError(f"{path} senses walls, which this model does not")
     if neighbours is not None:

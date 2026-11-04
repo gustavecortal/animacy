@@ -18,12 +18,10 @@ import numpy as np
 import torch
 
 from . import corpus, data, scenes
+from .configs import BATCH, FINAL_LR_FRACTION, KEEP, LENGTH, NEIGHBOURS, STAGES, WARMUP_FRACTION, WEIGHT_DECAY
 from .corpus import write_json
 from .model import SEED, Config, Model, load_checkpoint, mixture_mean, neighbour_inputs, nll
 
-NEIGHBOURS = 16  # most neighbours an animal sees
-KEEP = (0, 1, 2, 4, 8, 16)  # nearest neighbours a training batch shows, drawn uniformly per batch
-LENGTH = 256  # tokens per window, and each layer's attention window
 EVAL_EVERY = 250  # updates between validation and checkpoints
 LOG_EVERY = 25
 
@@ -50,17 +48,19 @@ class Windows:
         valid = idx + 1 < self.end[s][:, None]
         return torch.where(valid, idx, s[:, None]), valid
 
-    def gather(self, idx, valid, rotation):
+    def gather(self, idx, valid, rotation) -> tuple[torch.Tensor, torch.Tensor]:
+        """Inputs and targets [b, LENGTH, 2], zero beyond the real targets, rotated by `rotation` if given."""
         inputs = self.tokens[idx] * valid[..., None]
         targets = self.tokens[torch.where(valid, idx + 1, idx)] * valid[..., None]
         if rotation is not None:
             r = torch.from_numpy(rotation).to(idx.device)
             inputs, targets = inputs @ r.transpose(1, 2), targets @ r.transpose(1, 2)
-        return inputs, targets, valid
+        return inputs, targets
 
     def batch(self, starts: np.ndarray, rotation: np.ndarray | None = None, keep: int = 0):
         """Inputs and targets [b, LENGTH, 2], the mask of real targets, and no neighbours."""
-        return *self.gather(*self.index(starts), rotation), None
+        idx, valid = self.index(starts)
+        return *self.gather(idx, valid, rotation), valid, None
 
 
 class SceneWindows(Windows):
@@ -71,8 +71,10 @@ class SceneWindows(Windows):
     `seen` and `seen_step`."""
 
     def __init__(self, scenes_dir: Path, partition: str, device):
-        self.scale = json.loads((scenes_dir / "scenes.json").read_text(encoding="utf-8"))["scale"]
-        arrays = [scenes.load(scenes_dir, s, "positions", "seen", "seen_step") for s in scenes.sessions(scenes_dir, partition)]
+        summary = scenes.read(scenes_dir)
+        self.scale = summary["scale"]
+        entries = [e for e in summary["sessions"].values() if e["partition"] == partition]
+        arrays = [scenes.load(scenes_dir, e, "positions", "seen", "seen_step") for e in entries]
         width = max(a.shape[1] for a, _, _ in arrays)
         rows = sum(len(a) for a, _, _ in arrays)
         seen_all, step_all = (np.full((rows, width, 2), np.nan, dtype=np.float32) for _ in range(2))
@@ -97,13 +99,13 @@ class SceneWindows(Windows):
         """As Windows.batch, with (relative, displacement, visible) of the `keep` nearest neighbours of each
         step, or None for none."""
         idx, valid = self.index(starts)
-        inputs, targets, valid = self.gather(idx, valid, rotation)
+        inputs, targets = self.gather(idx, valid, rotation)
         if not keep:
             return inputs, targets, valid, None
         now = self.now[idx]
-        relative, displacement, visible = neighbour_inputs(self.seen[now], self.seen_step[now], self.animal[idx], NEIGHBOURS, self.scale)
-        visible = (visible & valid[..., None])[:, :, :keep]
-        relative, displacement = relative[:, :, :keep] * visible[..., None], displacement[:, :, :keep] * visible[..., None]
+        relative, displacement, visible = neighbour_inputs(self.seen[now], self.seen_step[now], self.animal[idx], keep, self.scale)
+        visible = visible & valid[..., None]
+        relative, displacement = relative * visible[..., None], displacement * visible[..., None]
         if rotation is not None:
             r = torch.from_numpy(rotation).to(idx.device)[:, None]
             relative, displacement = relative @ r.transpose(-1, -2), displacement @ r.transpose(-1, -2)
@@ -122,7 +124,7 @@ def random_rotations(rng: np.random.Generator, n: int) -> np.ndarray:
 def device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+    if torch.xpu.is_available():
         return torch.device("xpu")
     if torch.backends.mps.is_available():
         return torch.device("mps")
@@ -155,11 +157,16 @@ def evaluate(model: Model, windows: Windows, starts: np.ndarray, batch: int) -> 
     return total / count
 
 
-def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: float, mean_weight: float, init: Path | None,
-          batch: int, final_lr_fraction: float = 0.1, warmup_fraction: float = 0.1, weight_decay: float = 0.1) -> dict:  # fmt: skip
-    """Train with linear warmup over `warmup_fraction` of the steps then cosine decay to `final_lr_fraction`,
-    and write out/model.pt. With `scenes_dir`, the model sees its neighbours and starts from `init`, and each
-    batch shows only one of KEEP nearest. Resumes from out/last.pt if present."""
+def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: float, mean_weight: float, init: Path | None, batch: int) -> dict | None:
+    """Train with the learning rate schedule of configs.py and write out/model.pt. With `scenes_dir`, the model
+    sees its neighbours and starts from `init`, and each batch shows only one of KEEP nearest. Resumes from
+    out/last.pt if present. Returns None, training nothing, if out/model.pt was trained with these settings."""
+    wanted = {"steps": steps, "lr": lr, "mean_weight": mean_weight, "batch": batch}
+    if (out / "model.pt").exists():
+        done = torch.load(out / "model.pt", map_location="cpu", weights_only=False)["run"]
+        if any(done.get(k) != v for k, v in wanted.items()):
+            raise ValueError(f"{out} was trained with {({k: done.get(k) for k in wanted})}, not {wanted}: remove it or pass --out")
+        return None
     dev = device()
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(SEED)
@@ -172,14 +179,14 @@ def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: 
     model = (load_checkpoint(init, NEIGHBOURS if social else None)[0] if init else Model(Config(window=LENGTH))).to(dev)
     matrices = [p for p in model.parameters() if p.ndim >= 2]  # weight decay on matrices only, not on norm scales
     others = [p for p in model.parameters() if p.ndim < 2]
-    opt = torch.optim.AdamW([{"params": matrices, "weight_decay": weight_decay}, {"params": others, "weight_decay": 0.0}], lr=lr, betas=(0.9, 0.95))
-    warmup = max(1, round(warmup_fraction * steps))
+    opt = torch.optim.AdamW([{"params": matrices, "weight_decay": WEIGHT_DECAY}, {"params": others, "weight_decay": 0.0}], lr=lr, betas=(0.9, 0.95))
+    warmup = max(1, round(WARMUP_FRACTION * steps))
 
     def schedule(step: int) -> float:
         if step < warmup:
             return (step + 1) / warmup
         progress = (step - warmup) / max(1, steps - warmup)
-        return final_lr_fraction + (1 - final_lr_fraction) * 0.5 * (1 + math.cos(math.pi * min(1.0, progress)))
+        return FINAL_LR_FRACTION + (1 - FINAL_LR_FRACTION) * 0.5 * (1 + math.cos(math.pi * min(1.0, progress)))
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, schedule)
     run = {"config": asdict(model.config), "scale": train_w.scale, "init": str(init) if init else None, "steps": steps,
@@ -239,7 +246,22 @@ def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: 
         since, skipped = 0, 0
     if math.isnan(val):  # resumed from a last.pt saved at the final step
         val = evaluate(model, val_w, val_starts, batch)
-    # The keys of the site's checkpoints, so export reads either.
+    # "config", "scale" and "val" are what export reads, as in the checkpoints the shipped models came from.
     torch.save({"model": model.state_dict(), "config": run["config"], "scale": train_w.scale, "run": run, "step": step, "val": val}, out / "model.pt")
     write_json(out / "summary.json", {**run, "validation_nll": val, "minutes": (time.time() - started) / 60})
     return run
+
+
+def train_stages(corpus_dir: Path, scenes_dir: Path, out: Path, stage: str | None = None, steps: int | None = None, batch: int = BATCH) -> None:
+    """The stages of configs.py into out/<stage>/, each from the last one's model.pt, or only `stage`. A stage
+    already trained with these settings is skipped. `steps` replaces each stage's own count, for a short check."""
+    previous = None
+    for s in STAGES:
+        here = out / s.name
+        if stage in (None, s.name):
+            print(f"{s.name}: {here}", flush=True)
+            if train(corpus_dir, scenes_dir if s.neighbours else None, here, steps or s.steps, s.lr, s.mean_weight, previous, batch) is None:
+                print(f"{s.name}: already trained, skipped", flush=True)
+        if stage == s.name:
+            return
+        previous = here / "model.pt"

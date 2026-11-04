@@ -2,7 +2,6 @@
 the whole pipeline on synthetic recordings."""
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +14,7 @@ from animacy.model import Config, Model, neighbour_inputs
 from animacy.rollout import rollout
 
 ROOT = Path(__file__).resolve().parent.parent
-PAGE = json.loads((Path(__file__).parent / "page_outputs.json").read_text())
+PAGE = json.loads((Path(__file__).parent / "page_outputs.json").read_text(encoding="utf-8"))
 
 
 def synthetic_inputs(n: int, animals: int, scale: float):
@@ -75,8 +74,8 @@ def synthetic_recordings(data_dir: Path) -> tuple[list[dict], list[corpus.Run]]:
     for s in range(6):
         name = f"session_{s}"
         (data_dir / name).mkdir(parents=True)
-        (data_dir / name / "validated_attributes.json").write_text(json.dumps({"body_length": 20.0}))
-        (data_dir / name / "video_header.json").write_text(json.dumps({"size": [1000, 1000]}))
+        corpus.write_json(data_dir / name / "validated_attributes.json", {"body_length": 20.0})
+        corpus.write_json(data_dir / name / "video_header.json", {"size": [1000, 1000]})
         records.append({"session": name, "group": name, "animals": 3, "frames": len(t), "fps": 30.0, "frame_size": [1000, 1000], "roi": None})
         for a in range(3):
             phase = rng.uniform(0, 2 * np.pi)
@@ -85,52 +84,62 @@ def synthetic_recordings(data_dir: Path) -> tuple[list[dict], list[corpus.Run]]:
     return records, runs
 
 
-def test_build_train_export_and_rollout_on_synthetic_recordings(tmp_path, monkeypatch):
+@pytest.fixture(scope="module")
+def built(tmp_path_factory) -> Path:
+    """A folder with the synthetic recordings' sessions/, corpus/ and scenes/, shared by the tests that read them."""
+    root = tmp_path_factory.mktemp("synthetic")
+    records, runs = synthetic_recordings(root / "sessions")
+    corpus.build(runs, root / "corpus")
+    scenes.build(runs, records, root / "corpus", root / "scenes")
+    return root
+
+
+@pytest.fixture
+def short_windows(monkeypatch):
     monkeypatch.setattr(train, "LENGTH", 64)
     monkeypatch.setattr(train, "EVAL_EVERY", 10)
-    records, runs = synthetic_recordings(tmp_path / "sessions")
-    corpus.build(runs, tmp_path / "corpus")
-    scenes.build(runs, records, tmp_path / "corpus", tmp_path / "scenes")
-    train.train(tmp_path / "corpus", None, tmp_path / "solo", 10, 2e-3, 0.0, None, 4)
-    train.train(tmp_path / "corpus", tmp_path / "scenes", tmp_path / "group", 10, 5e-4, 10.0, tmp_path / "solo" / "model.pt", 4)
+
+
+def test_train_export_and_rollout_on_synthetic_recordings(built, tmp_path, short_windows):
+    train.train(built / "corpus", None, tmp_path / "solo", 10, 2e-3, 0.0, None, 4)
+    train.train(built / "corpus", built / "scenes", tmp_path / "group", 10, 5e-4, 10.0, tmp_path / "solo" / "model.pt", 4)
     windows = ((64, 16, 16, 16), (16, 16, 16, 16), (16, 16, 16, 16), (16, 16, 16, 64))
-    export(tmp_path / "group" / "model.pt", tmp_path / "corpus", tmp_path / "scenes", tmp_path / "sessions", tmp_path / "export", windows)
-    manifest = json.loads((tmp_path / "export" / "model.json").read_text())
+    export(tmp_path / "group" / "model.pt", built / "corpus", built / "scenes", built / "sessions", tmp_path / "export", windows)
+    manifest = json.loads((tmp_path / "export" / "model.json").read_text(encoding="utf-8"))
     assert manifest["config"]["head_windows"] == [list(row) for row in windows] and manifest["total_bytes"] == len((tmp_path / "export" / "weights.bin").read_bytes())
-    fixtures = json.loads((tmp_path / "export" / "fixtures.json").read_text())
+    fixtures = json.loads((tmp_path / "export" / "fixtures.json").read_text(encoding="utf-8"))
     model = load_export(tmp_path / "export").double()
     inputs = neighbour_inputs(*(torch.tensor(np.array(fixtures[k], dtype=float)) for k in ("seen", "seen_step")), torch.full((len(fixtures["tokens"]),), fixtures["animal"]), 16, manifest["scale"])
     with torch.no_grad():
         raw = model(torch.tensor(fixtures["tokens"], dtype=torch.float64)[None], tuple(x[None] for x in inputs))[0].numpy()
     np.testing.assert_allclose(raw[fixtures["indices"]], fixtures["raw"], rtol=1e-9, atol=1e-9)
-    summary = rollout(tmp_path / "export", tmp_path / "corpus", tmp_path / "scenes", tmp_path / "sessions", tmp_path / "school.gif", 1.0, seconds=1.0)
+    summary = rollout(tmp_path / "export", tmp_path / "school.gif", 1.0, seconds=1.0, recorded=(built / "corpus", built / "scenes", built / "sessions"))
     assert summary["animals"] == 3 and (tmp_path / "school.gif").stat().st_size > 0
 
 
-def test_train_reruns_only_finished_stages_with_the_recipe_settings(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("name", ["fish", "flies", "both"])
+def test_shipped_models_roll_out_without_the_recordings(name, tmp_path):
+    summary = rollout(ROOT / "exports" / name, tmp_path / "school.gif", 1.0, seconds=1.0)
+    assert summary["animals"] == 10 and (tmp_path / "school.gif").stat().st_size > 0
+
+
+def test_train_reruns_only_finished_stages_with_the_recipe_settings(built, tmp_path, short_windows, monkeypatch, capsys):
     """A short --steps check is not taken for a finished stage by a later full run."""
-    from animacy import cli
     from animacy.configs import Stage
 
-    monkeypatch.setattr(train, "LENGTH", 64)
-    monkeypatch.setattr(train, "EVAL_EVERY", 10)
-    monkeypatch.setattr(cli, "STAGES", (Stage("solo", 6, 2e-3, 0.0, False), Stage("group", 6, 5e-4, 10.0, True)))
-    monkeypatch.setattr(cli, "paths", lambda name: (tmp_path / "corpus", tmp_path / "scenes"))
-    records, runs = synthetic_recordings(tmp_path / "sessions")
-    corpus.build(runs, tmp_path / "corpus")
-    scenes.build(runs, records, tmp_path / "corpus", tmp_path / "scenes")
-    out = tmp_path / "runs"
-    cli.train("fish", None, 2, 4, out)
-    with pytest.raises(SystemExit, match="remove it or pass --out"):
-        cli.train("fish", None, None, 4, out)
+    monkeypatch.setattr(train, "STAGES", (Stage("solo", 6, 2e-3, 0.0, False), Stage("group", 6, 5e-4, 10.0, True)))
+    stages = lambda stage=None, steps=None: train.train_stages(built / "corpus", built / "scenes", tmp_path, stage, steps, 4)
+    stages(steps=2)
+    with pytest.raises(ValueError, match="remove it or pass --out"):
+        stages()
     for stage in ("solo", "group"):
-        for f in (out / stage).iterdir():
+        for f in (tmp_path / stage).iterdir():
             f.unlink()
-    cli.train("fish", None, None, 4, out)
-    assert torch.load(out / "group" / "model.pt", weights_only=False)["step"] == 6
+    stages()
+    assert torch.load(tmp_path / "group" / "model.pt", weights_only=False)["step"] == 6
     capsys.readouterr()
-    cli.train("fish", None, None, 4, out)
+    stages()
     assert capsys.readouterr().out.count("skipped") == 2
-    (out / "group" / "model.pt").unlink()  # resumed from a last.pt at the final step, it still has a validation loss
-    cli.train("fish", "group", None, 4, out)
-    assert np.isfinite(torch.load(out / "group" / "model.pt", weights_only=False)["val"])
+    (tmp_path / "group" / "model.pt").unlink()  # resumed from a last.pt at the final step, it still has a validation loss
+    stages("group")
+    assert np.isfinite(torch.load(tmp_path / "group" / "model.pt", weights_only=False)["val"])

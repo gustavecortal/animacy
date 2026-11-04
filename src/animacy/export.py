@@ -8,6 +8,7 @@ seeds.json holds the page's recorded starts: three 2 s paths and 2 s of every an
 """
 
 import json
+import math
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -140,8 +141,7 @@ def seeds(corpus_dir: Path, scenes_dir: Path, data_dir: Path) -> dict:
         seed = picked[label][: SEED_S * RATE_HZ + 1].astype(np.float64)
         seed -= (seed.min(axis=0) + seed.max(axis=0)) / 2
         chosen[name] = np.round(seed, 6).tolist()
-    zooms = json.loads((corpus_dir / "zooms.json").read_text()) if (corpus_dir / "zooms.json").exists() else {}
-    length = lambda name: data.body_length(data_dir, name) * zooms.get(name, 1.0)
+    length = lambda name: data.body_length(data_dir, corpus_dir, name)
     mine = [length(r) for r in set(corpus.sequence_field(corpus_dir, "train", "recording"))]
     train, train_offsets, _ = corpus.load(corpus_dir, "train")
     moved = np.linalg.norm(np.diff(train.astype(np.float64), axis=0), axis=-1) * RATE_HZ
@@ -164,6 +164,8 @@ def export(checkpoint: Path, corpus_dir: Path, scenes_dir: Path, data_dir: Path,
     """Write the four files to out/, each head attending to its window of `head_windows`, the fixtures included,
     so the browser's parity check covers the model it runs."""
     model, ckpt = load_checkpoint(checkpoint)
+    if not math.isfinite(ckpt["val"]):
+        raise ValueError(f"{checkpoint} has no validation loss")
     windowed = Model(replace(model.config, head_windows=tuple(map(tuple, head_windows))))
     windowed.load_state_dict(model.state_dict())
     model, scale = windowed.eval(), ckpt["scale"]

@@ -32,11 +32,10 @@ class Recipe:
     # The page's default sampling temperature: below 1 where free-running animals would move faster than
     # recorded ones.
     temperature: float
-    site_name: str  # its folder on the site
 
 
 MODELS = {
-    "fish": Recipe(("fish",), False, ((256, 256, 256, 256), (16, 16, 16, 16), (16, 16, 16, 16), (16, 16, 256, 64)), 1.0, "fish"),
-    "flies": Recipe(("flies",), True, ((256, 256, 256, 256), (16, 16, 16, 32), (16, 16, 32, 256), (256, 16, 16, 16)), 0.75, "flies"),
-    "both": Recipe(("fish", "flies"), True, ((256, 256, 256, 16), (16, 16, 64, 16), (16, 16, 16, 16), (256, 16, 256, 16)), 0.85, "hybrid"),
+    "fish": Recipe(("fish",), False, ((256, 256, 256, 256), (16, 16, 16, 16), (16, 16, 16, 16), (16, 16, 256, 64)), 1.0),
+    "flies": Recipe(("flies",), True, ((256, 256, 256, 256), (16, 16, 16, 32), (16, 16, 32, 256), (256, 16, 16, 16)), 0.75),
+    "both": Recipe(("fish", "flies"), True, ((256, 256, 256, 16), (16, 16, 64, 16), (16, 16, 16, 16), (256, 16, 256, 16)), 0.85),
 }

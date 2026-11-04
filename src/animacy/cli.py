@@ -31,8 +31,8 @@ def fetch(name: str) -> int:
             print(session, flush=True)
             try:
                 data.fetch(session, SESSIONS)
-            except RuntimeError as error:  # a quota page: the other sessions can still come
-                print(error, file=sys.stderr)
+            except Exception as error:  # a used-up quota or a missing file: the other sessions can still come
+                print(f"{session}: {type(error).__name__}: {error}", file=sys.stderr)
                 failed.append(session)
     if failed:
         print(f"not fetched: {', '.join(failed)}", file=sys.stderr)
@@ -49,7 +49,9 @@ def build(name: str) -> None:
         if recipe.body_lengths:
             f, z = data.in_body_lengths(f, SESSIONS)
             zooms |= z
-            r = [{**x, "roi": None} for x in r]  # a tracking region is in frame units, wrong once rescaled
+            # A tracking region is in pixels, wrong once positions are rescaled. It is dropped rather than
+            # rescaled because the shipped scenes.json and seeds' arenas were built without it.
+            r = [{**x, "roi": None} for x in r]
         records += r
         runs += f
     corpus_dir, scenes_dir = paths(name)
@@ -61,15 +63,24 @@ def build(name: str) -> None:
 
 
 def train(name: str, stage: str | None, steps: int | None, batch: int, out: Path | None) -> None:
+    import torch
+
     from . import train
 
     corpus_dir, scenes_dir = paths(name)
     previous = None
     for s in STAGES:
         here = (out or Path("runs") / name) / s.name
-        if stage in (None, s.name) and not (here / "model.pt").exists():
-            print(f"{name}: {s.name}", flush=True)
-            train.train(corpus_dir, scenes_dir if s.neighbours else None, here, steps or s.steps, s.lr, s.mean_weight, previous, batch)
+        if stage in (None, s.name):
+            wanted = {"steps": steps or s.steps, "lr": s.lr, "mean_weight": s.mean_weight, "batch": batch}
+            if (here / "model.pt").exists():
+                run = torch.load(here / "model.pt", map_location="cpu", weights_only=False)["run"]
+                if any(run.get(k) != v for k, v in wanted.items()):
+                    raise SystemExit(f"{here} was trained with {({k: run.get(k) for k in wanted})}, not {wanted}: remove it or pass --out")
+                print(f"{name}: {s.name} already trained in {here}, skipped", flush=True)
+            else:
+                print(f"{name}: {s.name}", flush=True)
+                train.train(corpus_dir, scenes_dir if s.neighbours else None, here, wanted["steps"], s.lr, s.mean_weight, previous, batch)
         if stage == s.name:
             return
         previous = here / "model.pt"
@@ -103,10 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "train":
         train(name, args.stage, args.steps, args.batch, args.out)
     elif args.command == "export":
+        import torch
+
         from .export import export
 
         corpus_dir, scenes_dir = paths(name)
         checkpoint = args.checkpoint or Path("runs") / name / STAGES[-1].name / "model.pt"
+        step = torch.load(checkpoint, map_location="cpu", weights_only=False)["step"]
+        if args.out is None and step != STAGES[-1].steps:
+            raise SystemExit(f"{checkpoint} was trained for {step} steps, not {STAGES[-1].steps}: pass --out to export it outside exports/")
         print(json.dumps(export(checkpoint, corpus_dir, scenes_dir, SESSIONS, args.out or Path("exports") / name, MODELS[name].head_windows), indent=1))
     elif args.command == "rollout":
         from .rollout import rollout

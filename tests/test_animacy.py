@@ -105,3 +105,32 @@ def test_build_train_export_and_rollout_on_synthetic_recordings(tmp_path, monkey
     np.testing.assert_allclose(raw[fixtures["indices"]], fixtures["raw"], rtol=1e-9, atol=1e-9)
     summary = rollout(tmp_path / "export", tmp_path / "corpus", tmp_path / "scenes", tmp_path / "sessions", tmp_path / "school.gif", 1.0, seconds=1.0)
     assert summary["animals"] == 3 and (tmp_path / "school.gif").stat().st_size > 0
+
+
+def test_train_reruns_only_finished_stages_with_the_recipe_settings(tmp_path, monkeypatch, capsys):
+    """A short --steps check is not taken for a finished stage by a later full run."""
+    from animacy import cli
+    from animacy.configs import Stage
+
+    monkeypatch.setattr(train, "LENGTH", 64)
+    monkeypatch.setattr(train, "EVAL_EVERY", 10)
+    monkeypatch.setattr(cli, "STAGES", (Stage("solo", 6, 2e-3, 0.0, False), Stage("group", 6, 5e-4, 10.0, True)))
+    monkeypatch.setattr(cli, "paths", lambda name: (tmp_path / "corpus", tmp_path / "scenes"))
+    records, runs = synthetic_recordings(tmp_path / "sessions")
+    corpus.build(runs, tmp_path / "corpus")
+    scenes.build(runs, records, tmp_path / "corpus", tmp_path / "scenes")
+    out = tmp_path / "runs"
+    cli.train("fish", None, 2, 4, out)
+    with pytest.raises(SystemExit, match="remove it or pass --out"):
+        cli.train("fish", None, None, 4, out)
+    for stage in ("solo", "group"):
+        for f in (out / stage).iterdir():
+            f.unlink()
+    cli.train("fish", None, None, 4, out)
+    assert torch.load(out / "group" / "model.pt", weights_only=False)["step"] == 6
+    capsys.readouterr()
+    cli.train("fish", None, None, 4, out)
+    assert capsys.readouterr().out.count("skipped") == 2
+    (out / "group" / "model.pt").unlink()  # resumed from a last.pt at the final step, it still has a validation loss
+    cli.train("fish", "group", None, 4, out)
+    assert np.isfinite(torch.load(out / "group" / "model.pt", weights_only=False)["val"])

@@ -138,7 +138,7 @@ def forward(model: Model, inputs: torch.Tensor, neighbours) -> torch.Tensor:
 def mean_loss(raw: torch.Tensor, targets: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     """Squared error of the mixture's mean step per real target. Likelihood fits the density's bulk and can
     leave its mean off by a drift that is small at each step but adds up over seconds, such as the turn back
-    toward the group; this term's minimum is the true conditional mean."""
+    toward the group. This term's minimum is the true conditional mean."""
     return (((targets - mixture_mean(raw)) ** 2).sum(-1) * valid).sum() / valid.sum()
 
 
@@ -186,7 +186,7 @@ def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: 
            "lr": lr, "mean_weight": mean_weight, "batch": batch, "device": str(dev), "torch": torch.__version__}  # fmt: skip
     step, last = 0, out / "last.pt"
     if last.exists():
-        ckpt = torch.load(last, weights_only=False)
+        ckpt = torch.load(last, weights_only=False, map_location=dev)
         if {k: v for k, v in ckpt["run"].items() if k not in ("device", "torch")} != {k: v for k, v in run.items() if k not in ("device", "torch")}:
             raise ValueError(f"{last} was trained with other settings: remove {out} to start again")
         model.load_state_dict(ckpt["model"])
@@ -237,6 +237,8 @@ def train(corpus_dir: Path, scenes_dir: Path | None, out: Path, steps: int, lr: 
         print(json.dumps({k: round(v, 5) if isinstance(v, float) else v for k, v in entry.items()}), flush=True)
         sums.zero_()
         since, skipped = 0, 0
+    if math.isnan(val):  # resumed from a last.pt saved at the final step
+        val = evaluate(model, val_w, val_starts, batch)
     # The keys of the site's checkpoints, so export reads either.
     torch.save({"model": model.state_dict(), "config": run["config"], "scale": train_w.scale, "run": run, "step": step, "val": val}, out / "model.pt")
     write_json(out / "summary.json", {**run, "validation_nll": val, "minutes": (time.time() - started) / 60})

@@ -9,10 +9,12 @@ import csv
 import dataclasses
 import functools
 import html
+import http.client
 import json
 import re
 import struct
 import time
+import urllib.error
 import urllib.request
 from importlib import resources
 from pathlib import Path
@@ -78,29 +80,50 @@ def pinned() -> dict[str, dict[str, str]]:
     return json.loads(resources.files(__package__).joinpath("sessions.json").read_text(encoding="utf-8"))
 
 
-def _get(url: str, start: int, end: int, attempts: int = 8) -> tuple[bytes, int]:
-    """Bytes start..end inclusive (fewer at the end of the file) and the file's size. Drive sometimes
-    answers with a web page instead of the file, which is retried like a dropped connection, unless it
-    says the file's download quota is used up."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Range": f"bytes={start}-{end}"})
+def transient(error: Exception) -> bool:
+    """Whether a failed request may succeed if repeated: a timeout, a dropped or refused connection, a cut
+    read, or HTTP 408, 429 or 5xx. Other HTTP errors, such as 403, 404 or 416, will not change."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (408, 429) or error.code >= 500
+    return isinstance(error, (OSError, http.client.HTTPException))
+
+
+def retried(request, attempts: int = 8):
+    """request() repeated with growing pauses (about 21 minutes in all) while it fails transiently."""
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                if "text/html" in response.headers.get("Content-Type", ""):
-                    if b"Quota exceeded" in response.read():
-                        raise RuntimeError(f"{url}: Google Drive's download quota for this file is used up. Run fetch again later: it keeps the files it has.")
-                    raise ConnectionError(f"{url}: a web page instead of the file")
-                if response.status == 206:
-                    return response.read(), int(response.headers["Content-Range"].rpartition("/")[2])
-                if response.status == 200 and start == 0:  # Drive sends some small files whole
-                    data = response.read(end + 1)
-                    return data, int(response.headers.get("Content-Length") or len(data))
-                raise ValueError(f"{url}: HTTP {response.status} to a range request")
-        except OSError:  # including HTTPError and ConnectionError
-            if attempt == attempts - 1:
+            return request()
+        except Exception as error:
+            if not transient(error) or attempt == attempts - 1:
                 raise
             time.sleep(5 * 2**attempt)
     raise AssertionError("unreachable")
+
+
+def check_quota(url: str, page: bytes) -> None:
+    """Drive answers with a web page when a file's download quota is used up, which retrying soon does not fix."""
+    if b"Quota exceeded" in page:
+        raise RuntimeError(f"{url}: Google Drive's download quota for this file is used up. Run fetch again later: it keeps the files it has.")
+
+
+def _get(url: str, start: int, end: int) -> tuple[bytes, int]:
+    """Bytes start..end inclusive (fewer at the end of the file) and the file's size. Drive sometimes
+    answers with a web page instead of the file, which is retried like a dropped connection."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Range": f"bytes={start}-{end}"})
+
+    def once() -> tuple[bytes, int]:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if "text/html" in response.headers.get("Content-Type", ""):
+                check_quota(url, response.read())
+                raise ConnectionError(f"{url}: a web page instead of the file")
+            if response.status == 206:
+                return response.read(), int(response.headers["Content-Range"].rpartition("/")[2])
+            if response.status == 200 and start == 0:  # Drive sends some small files whole
+                data = response.read(end + 1)
+                return data, int(response.headers.get("Content-Length") or len(data))
+            raise ValueError(f"{url}: HTTP {response.status} to a range request")
+
+    return retried(once)
 
 
 def get_range(url: str, start: int = 0, end: int | None = None) -> bytes:
@@ -124,13 +147,23 @@ def write_atomic(dest: Path, data: bytes) -> None:
     partial.replace(dest)
 
 
-@functools.cache
+@functools.cache  # a failed listing raises, so only complete ones are kept
 def list_folder(folder_id: str) -> dict[str, str]:
-    """Names and IDs of a public Drive folder's entries."""
-    request = urllib.request.Request(FOLDER_URL.format(folder_id), headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        page = response.read().decode()
-    return {html.unescape(name): entry for entry, name in ENTRY.findall(page)}
+    """Names and IDs of a public Drive folder's entries. A page without entries is retried, since none of
+    the folders read here is empty."""
+    url = FOLDER_URL.format(folder_id)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+    def once() -> dict[str, str]:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            page = response.read()
+        check_quota(url, page)
+        entries = {html.unescape(name): entry for entry, name in ENTRY.findall(page.decode())}
+        if not entries:
+            raise ConnectionError(f"{url}: a page without the folder's entries")
+        return entries
+
+    return retried(once)
 
 
 def find(folder_id: str, path: str) -> str:
@@ -145,7 +178,7 @@ def find(folder_id: str, path: str) -> str:
 
 def video_header(session: str) -> dict:
     """Frame size, frame rate and length from the first 64 KiB of the session's AVI."""
-    data = get_range(FILE_URL.format(list_folder(VIDEOS)[f"{session}.avi"]), 0, 65535)
+    data = get_range(FILE_URL.format(find(VIDEOS, f"{session}.avi")), 0, 65535)
     if data[:4] != b"RIFF" or data[8:12] != b"AVI ":
         raise ValueError(f"{session}.avi is not an AVI file")
     i = data.find(b"avih")
@@ -168,7 +201,7 @@ def fetch(session: str, data_dir: Path) -> None:
             continue
         remote = remote or find(TRACKED_SESSIONS, f"session_{session}")
         if name == "inconsistent_frames.csv":
-            data = get_range(FILE_URL.format(list_folder(remote)[name]))
+            data = get_range(FILE_URL.format(find(remote, name)))
         elif name == "video_header.json":
             data = json.dumps(video_header(session)).encode()
         else:
@@ -246,10 +279,18 @@ def family_runs(family: str, data_dir: Path) -> tuple[list[dict], list[Run]]:
     return records, out
 
 
-def body_length(data_dir: Path, name: str) -> float:
-    """A session's animal length in frame units: idtracker.ai's estimate over the frame's longer side."""
+def body_pixels(data_dir: Path, name: str) -> tuple[float, int]:
+    """A session's animal length in pixels, as idtracker.ai estimated it, and its frame's longer side."""
     pixels = json.loads((data_dir / name / "validated_attributes.json").read_text(encoding="utf-8"))["body_length"]
-    return pixels / max(json.loads((data_dir / name / "video_header.json").read_text(encoding="utf-8"))["size"])
+    return pixels, max(json.loads((data_dir / name / "video_header.json").read_text(encoding="utf-8"))["size"])
+
+
+def body_length(data_dir: Path, corpus_dir: Path, name: str) -> float:
+    """A session's animal length in the corpus's frame units: over the frame's longer side, times the
+    session's zoom where the corpus is in body lengths (its zooms.json)."""
+    pixels, side = body_pixels(data_dir, name)
+    zooms = corpus_dir / "zooms.json"
+    return pixels / side * (json.loads(zooms.read_text(encoding="utf-8")).get(name, 1.0) if zooms.exists() else 1.0)
 
 
 def in_body_lengths(runs_: list[Run], data_dir: Path) -> tuple[list[Run], dict[str, float]]:
@@ -259,8 +300,8 @@ def in_body_lengths(runs_: list[Run], data_dir: Path) -> tuple[list[Run], dict[s
     out, zooms = [], {}
     for run in runs_:
         if run.recording not in zooms:
-            pixels = json.loads((data_dir / run.recording / "validated_attributes.json").read_text(encoding="utf-8"))["body_length"]
-            zooms[run.recording] = REFERENCE_BODY * max(run.frame_size) / pixels
+            pixels, side = body_pixels(data_dir, run.recording)
+            zooms[run.recording] = REFERENCE_BODY * side / pixels
         centre = np.array(run.frame_size, dtype=np.float64) / 2
         out.append(dataclasses.replace(run, xy=centre + (run.xy - centre) * zooms[run.recording]))
     return out, zooms

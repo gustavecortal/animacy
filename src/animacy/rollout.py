@@ -5,7 +5,6 @@ each seeing the others' generated positions as it saw recorded ones in training.
 the scene's arena, as the page folds animals into its square.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +17,7 @@ from .export import SCHOOLS_PER_SCENE, load_export
 from .model import fold, neighbour_inputs, sample
 
 SIZE = 480  # pixels
-FPS = 15  # frames per second of the GIF: every second model step
+FPS = 10  # GIF frames per second, every third model step, since a GIF frame lasts whole hundredths of a second
 TRAIL_S = 1.0
 
 
@@ -83,7 +82,5 @@ def rollout(export_dir: Path, corpus_dir: Path, scenes_dir: Path, data_dir: Path
     start = scenes.starts(positions, SCHOOLS_PER_SCENE)[0]
     box = scenes.arena(entry, positions)
     path = simulate(model, positions, seen, seen_step, start, seconds, box, temperature, seed)
-    zooms = corpus_dir / "zooms.json"
-    body = data.body_length(data_dir, session) * (json.loads(zooms.read_text())[session] if zooms.exists() else 1.0)
-    draw(path, box, body, dest)
+    draw(path, box, data.body_length(data_dir, corpus_dir, session), dest)
     return {"session": session, "start_s": start / RATE_HZ, "animals": positions.shape[1], "seconds": seconds, "gif": str(dest)}

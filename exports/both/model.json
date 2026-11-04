@@ -1,0 +1,437 @@
+{
+ "format": "trajectory-model",
+ "version": 4,
+ "config": {
+  "layers": 4,
+  "width": 128,
+  "heads": 4,
+  "ff_width": 512,
+  "window": 256,
+  "components": 5,
+  "rope_base": 10000.0,
+  "norm_eps": 1e-05,
+  "neighbours": 16,
+  "social_width": 64,
+  "walls": false,
+  "head_windows": [
+   [
+    256,
+    256,
+    256,
+    16
+   ],
+   [
+    16,
+    16,
+    64,
+    16
+   ],
+   [
+    16,
+    16,
+    16,
+    16
+   ],
+   [
+    256,
+    16,
+    256,
+    16
+   ]
+  ]
+ },
+ "rate_hz": 30,
+ "scale": 0.0021673674060575846,
+ "convention": "centered_x_right_y_up_max_extent",
+ "sigma_floor": 0.001,
+ "rho_limit": 0.999,
+ "dtype": "float16-le",
+ "definitions": {
+  "token": "displacement between consecutive 30 Hz positions divided by scale",
+  "linear": "y = W x (+ bias where the manifest lists one), W row-major [out, in]",
+  "rms_norm": "x / sqrt(mean(x^2) + norm_eps) * weight",
+  "embed": "h = embed.weight token, plus neighbours(token, ...) when config.neighbours > 0",
+  "neighbour_inputs": "for each other animal with a finite position and step: relative = (its position - own) / scale, displacement = its last step / scale. Keep the config.neighbours nearest by |relative|, nearest first; the rest are not visible",
+  "neighbours": "per visible neighbour, f = [token_x, token_y, relative / d, log d, displacement], d = max(|relative|, 0.1); e = gelu(social.encode.2 gelu(social.encode.0 f)); weights = softmax over visible neighbours of social.score e; result = social.out (sum of weights e), zero when none is visible",
+  "layer": "a = rms_norm(h, attn_norm); q, k, v = rows [0, width), [width, 2 width), [2 width, 3 width) of qkv.weight a; head i uses entries [i head_dim, (i + 1) head_dim) of each; q and k of each head go through rms_norm with q_norm and k_norm, then RoPE; h += out.weight attention(q, k, v); h += down.weight gelu(up.weight rms_norm(h, ff_norm))",
+  "rope": "pairs (x[2m], x[2m + 1]) of a head vector rotated by angle position * rope_base^(-2m / head_dim), as (x0 cos - x1 sin, x0 sin + x1 cos). Scores depend only on query position minus key position",
+  "attention": "per head, softmax over the current token and at most w - 1 before it of q.k / sqrt(head_dim), weights applied to v, heads concatenated, w being config.head_windows[layer][head], or config.window where it is null",
+  "gelu": "exact: x / 2 (1 + erf(x / sqrt(2)))",
+  "head": "raw = head.weight rms_norm(h, norm): components x [logit, mean_x, mean_y, raw_sigma_x, raw_sigma_y, raw_rho]",
+  "mixture": "weights softmax(logit / temperature), sigma = softplus(raw_sigma) + sigma_floor, rho = rho_limit tanh(raw_rho), all in token units"
+ },
+ "tensors": [
+  {
+   "name": "embed.weight",
+   "shape": [
+    128,
+    2
+   ],
+   "offset": 0,
+   "bytes": 512
+  },
+  {
+   "name": "blocks.0.attn_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 512,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.0.qkv.weight",
+   "shape": [
+    384,
+    128
+   ],
+   "offset": 768,
+   "bytes": 98304
+  },
+  {
+   "name": "blocks.0.out.weight",
+   "shape": [
+    128,
+    128
+   ],
+   "offset": 99072,
+   "bytes": 32768
+  },
+  {
+   "name": "blocks.0.q_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 131840,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.0.k_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 131904,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.0.ff_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 131968,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.0.up.weight",
+   "shape": [
+    512,
+    128
+   ],
+   "offset": 132224,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.0.down.weight",
+   "shape": [
+    128,
+    512
+   ],
+   "offset": 263296,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.1.attn_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 394368,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.1.qkv.weight",
+   "shape": [
+    384,
+    128
+   ],
+   "offset": 394624,
+   "bytes": 98304
+  },
+  {
+   "name": "blocks.1.out.weight",
+   "shape": [
+    128,
+    128
+   ],
+   "offset": 492928,
+   "bytes": 32768
+  },
+  {
+   "name": "blocks.1.q_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 525696,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.1.k_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 525760,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.1.ff_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 525824,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.1.up.weight",
+   "shape": [
+    512,
+    128
+   ],
+   "offset": 526080,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.1.down.weight",
+   "shape": [
+    128,
+    512
+   ],
+   "offset": 657152,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.2.attn_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 788224,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.2.qkv.weight",
+   "shape": [
+    384,
+    128
+   ],
+   "offset": 788480,
+   "bytes": 98304
+  },
+  {
+   "name": "blocks.2.out.weight",
+   "shape": [
+    128,
+    128
+   ],
+   "offset": 886784,
+   "bytes": 32768
+  },
+  {
+   "name": "blocks.2.q_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 919552,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.2.k_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 919616,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.2.ff_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 919680,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.2.up.weight",
+   "shape": [
+    512,
+    128
+   ],
+   "offset": 919936,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.2.down.weight",
+   "shape": [
+    128,
+    512
+   ],
+   "offset": 1051008,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.3.attn_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 1182080,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.3.qkv.weight",
+   "shape": [
+    384,
+    128
+   ],
+   "offset": 1182336,
+   "bytes": 98304
+  },
+  {
+   "name": "blocks.3.out.weight",
+   "shape": [
+    128,
+    128
+   ],
+   "offset": 1280640,
+   "bytes": 32768
+  },
+  {
+   "name": "blocks.3.q_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 1313408,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.3.k_norm.weight",
+   "shape": [
+    32
+   ],
+   "offset": 1313472,
+   "bytes": 64
+  },
+  {
+   "name": "blocks.3.ff_norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 1313536,
+   "bytes": 256
+  },
+  {
+   "name": "blocks.3.up.weight",
+   "shape": [
+    512,
+    128
+   ],
+   "offset": 1313792,
+   "bytes": 131072
+  },
+  {
+   "name": "blocks.3.down.weight",
+   "shape": [
+    128,
+    512
+   ],
+   "offset": 1444864,
+   "bytes": 131072
+  },
+  {
+   "name": "norm.weight",
+   "shape": [
+    128
+   ],
+   "offset": 1575936,
+   "bytes": 256
+  },
+  {
+   "name": "head.weight",
+   "shape": [
+    30,
+    128
+   ],
+   "offset": 1576192,
+   "bytes": 7680
+  },
+  {
+   "name": "social.encode.0.weight",
+   "shape": [
+    64,
+    7
+   ],
+   "offset": 1583872,
+   "bytes": 896
+  },
+  {
+   "name": "social.encode.0.bias",
+   "shape": [
+    64
+   ],
+   "offset": 1584768,
+   "bytes": 128
+  },
+  {
+   "name": "social.encode.2.weight",
+   "shape": [
+    64,
+    64
+   ],
+   "offset": 1584896,
+   "bytes": 8192
+  },
+  {
+   "name": "social.encode.2.bias",
+   "shape": [
+    64
+   ],
+   "offset": 1593088,
+   "bytes": 128
+  },
+  {
+   "name": "social.score.weight",
+   "shape": [
+    1,
+    64
+   ],
+   "offset": 1593216,
+   "bytes": 128
+  },
+  {
+   "name": "social.score.bias",
+   "shape": [
+    1
+   ],
+   "offset": 1593344,
+   "bytes": 2
+  },
+  {
+   "name": "social.out.weight",
+   "shape": [
+    128,
+    64
+   ],
+   "offset": 1593346,
+   "bytes": 16384
+  }
+ ],
+ "total_bytes": 1609730,
+ "weights_sha256": "acb22afc1445b4c87ced4d6d52cebee3d6753e32290cb4f54212959cd261ddde",
+ "corpus": {
+  "arrays": {
+   "train": "fa67266969b02ab4fd339c44fed6b20546d8cbe91923d6acb6f52bdfe3421ee1",
+   "validation": "bc9f985921bec601c6b1043a493cc6016f9afe7665cd13404301e1ec0fe80e3c",
+   "test": "ee8395d9bb0e1dd3823fdd131613301ec7f0525ef4f83add7ee9c79166b21026"
+  },
+  "split_manifest_sha256": "3d608375af2f02d3f1f15ef615501a245d5a52cca265fcc845e20ec1a9a3a91e"
+ },
+ "checkpoint": {
+  "step": 2000,
+  "validation_nll": -2.2011295594314277
+ }
+}

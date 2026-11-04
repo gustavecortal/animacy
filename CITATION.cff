@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "Please cite animacy if you use it."
+type: software
+title: "animacy: a tiny transformer trained on animal trajectories"
+abstract: >-
+  A tiny autoregressive transformer, trained on trajectories of fish and flies, that samples
+  each next step from a Gaussian mixture.
+authors:
+  - family-names: Cortal
+    given-names: Gustave
+repository-code: "https://github.com/gustavecortal/animacy"
+url: "https://gustavecortal.com/animacy/"
+license: MIT
+date-released: "2026-11-04"
+keywords:
+  - animal trajectories
+  - collective behaviour
+  - autoregressive transformer
+  - mixture density network
+  - idtracker.ai
+references:
+  - type: article
+    title: "New idtracker.ai rethinks multi-animal tracking as a representation learning problem to increase accuracy and reduce tracking time"
+    authors:
+      - family-names: Torrents
+        given-names: Jordi
+      - family-names: Costa
+        given-names: Tiago
+      - family-names: de Polavieja
+        given-names: Gonzalo
+    journal: eLife
+    volume: 14
+    year: 2026
+    doi: "10.7554/eLife.107602"
+  - type: article
+    title: "Generating Sequences With Recurrent Neural Networks"
+    authors:
+      - family-names: Graves
+        given-names: Alex
+    year: 2013
+    url: "https://arxiv.org/abs/1308.0850"

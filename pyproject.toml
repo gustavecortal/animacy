@@ -1,0 +1,23 @@
+[project]
+name = "animacy"
+version = "1.0.0"
+description = "A tiny autoregressive transformer, trained on trajectories of fish and flies, that samples each next step from a Gaussian mixture."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.1",
+  "pillow>=11",
+  "scipy>=1.14",
+  "torch>=2.8",
+]
+
+[project.scripts]
+animacy = "animacy.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"

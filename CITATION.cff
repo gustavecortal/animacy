@@ -15,6 +15,10 @@ date-released: "2026-11-04"
 keywords:
   - animal trajectories
   - collective behaviour
+  - collective motion
+  - trajectory generation
+  - zebrafish
+  - Drosophila
   - autoregressive transformer
   - mixture density network
   - idtracker.ai
@@ -30,6 +34,7 @@ references:
         given-names: Gonzalo
     journal: eLife
     volume: 14
+    start: RP107602
     year: 2026
     doi: "10.7554/eLife.107602"
   - type: article

@@ -8,8 +8,6 @@
 
 ## Quick start
 
-With [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
 ```bash
 git clone https://github.com/gustavecortal/animacy.git
 cd animacy
